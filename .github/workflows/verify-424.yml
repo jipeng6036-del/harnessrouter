@@ -1,0 +1,49 @@
+name: verify single-file archive fix
+
+on:
+  push:
+    branches: [verify/424-single-file-archive]
+
+permissions:
+  contents: read
+
+jobs:
+  runner:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 66038bc82d84e083befd3da8bc1cd74fbfe9e5db
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the project's runner CI dependencies
+        run: pip install -r runner/requirements.txt pytest pytest-asyncio httpx "systemone-harness @ git+https://github.com/HarnessRouter/SystemOneHarness@v0.4.0" "cheetahclaws==3.5.88"
+      - name: Verify the regression fails on the unchanged upstream implementation
+        run: |
+          git show 822550ea8847d056ca789a2bb6977890a4276c5c:runner/environments.py > runner/environments.py
+          set +e
+          python -m pytest runner/tests/test_environments.py -q -k single_file_with_or_without --junitxml=baseline.xml
+          result=$?
+          set -e
+          test "$result" -eq 1
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          suite = ET.parse("baseline.xml").getroot().find("testsuite")
+          assert suite.attrib["tests"] == "6", suite.attrib
+          assert suite.attrib["failures"] == "2", suite.attrib
+          assert suite.attrib["errors"] == "0", suite.attrib
+          assert suite.attrib["skipped"] == "0", suite.attrib
+          failures = [case for case in suite.findall("testcase") if case.find("failure") is not None]
+          assert all("False" in case.attrib["name"] and "project/" not in case.attrib["name"] for case in failures)
+          print("Confirmed: ZIP and TAR lose the top-level file; all four wrapping-directory controls pass.")
+          PY
+          git restore runner/environments.py
+      - name: Verify the fixed archive behavior and existing security tests
+        run: python -m pytest runner/tests/test_environments.py -q -k import_
+      - name: Run the project's complete runner suite
+        run: python -m pytest runner/tests -q
+      - name: Check the patch whitespace
+        run: git diff --check 822550ea8847d056ca789a2bb6977890a4276c5c HEAD
